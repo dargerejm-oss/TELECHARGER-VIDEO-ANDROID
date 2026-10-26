@@ -110,24 +110,27 @@ class DownloadService : Service() {
                 Store.currentProcessId = pid
                 try {
                     try {
-                        executer(construire(item.url, tmp, null, null), pid, item)
+                        executer(construire(item.url, tmp, null, null, false), pid, item)
                     } catch (e: Throwable) {
                         if (Store.stopRequested) throw e
-                        if (!(e.message ?: "").contains("Unsupported URL")) throw e
-                        // Site non reconnu : détection automatique du flux vidéo
-                        item.pct = 0f
-                        majNotif(item, "Détection de la vidéo…")
-                        Store.changed()
-                        StreamSniffer.urlCible = item.url
-                        val r = StreamSniffer.detect(applicationContext) { Store.stopRequested }
-                        if (Store.stopRequested) throw e
-                        if (r.flux == null) {
+                        val unsupported = (e.message ?: "").contains("Unsupported URL")
+                        if (!unsupported) {
+                            // 2e essai : version simplifiée (un seul fichier, sans fusion)
                             tmp.listFiles()?.forEach { it.delete() }
-                            throw RuntimeException("Aucune vidéo libre trouvée sur cette page (payante, protégée ou illisible)")
+                            item.pct = 0f
+                            majNotif(item, "Nouvel essai…")
+                            try {
+                                executer(construire(item.url, tmp, null, null, true), pid, item)
+                                throw OkSimple()
+                            } catch (_: OkSimple) {
+                                // réussi : on continue plus bas
+                            } catch (e2: Throwable) {
+                                if (Store.stopRequested) throw e2
+                                detecterEtTelecharger(item, tmp, pid, e2)
+                            }
+                        } else {
+                            detecterEtTelecharger(item, tmp, pid, e)
                         }
-                        tmp.listFiles()?.forEach { it.delete() }
-                        val nom = r.titre.replace(Regex("[\\\\/:*?\"<>|%\\r\\n]+"), " ").trim().take(80).ifEmpty { "video" }
-                        executer(construire(r.flux, tmp, nom, r.page), pid, item)
                     }
                     val fichier = tmp.listFiles()
                         ?.filter { it.isFile && it.extension.lowercase() in extOk }
@@ -144,7 +147,7 @@ class DownloadService : Service() {
                         item.pct = 0f
                     } else {
                         item.status = Store.ERREUR
-                        item.erreur = (e.message ?: "erreur").lines().lastOrNull { it.isNotBlank() }?.take(160) ?: "erreur"
+                        item.erreur = (e.message ?: "erreur").lines().filter { it.isNotBlank() }.takeLast(3).joinToString(" | ").take(420)
                         ko++
                     }
                 } finally {
@@ -166,12 +169,32 @@ class DownloadService : Service() {
         }
     }
 
-    private fun construire(url: String, tmp: File, nom: String?, referer: String?): YoutubeDLRequest {
+    private class OkSimple : RuntimeException()
+
+    /** Dernier recours : repère le lien direct de la vidéo dans la page puis le télécharge. */
+    private fun detecterEtTelecharger(item: Store.Item, tmp: File, pid: String, cause: Throwable) {
+        item.pct = 0f
+        majNotif(item, "Détection de la vidéo…")
+        Store.changed()
+        StreamSniffer.urlCible = item.url
+        val r = StreamSniffer.detect(applicationContext) { Store.stopRequested }
+        if (Store.stopRequested) throw cause
+        tmp.listFiles()?.forEach { it.delete() }
+        if (r.flux == null) {
+            throw RuntimeException("Aucune vidéo libre trouvée sur cette page. Détail : " + (cause.message ?: "").take(300))
+        }
+        val nom = r.titre.replace(Regex("[\\\\/:*?\"<>|%\\r\\n]+"), " ").trim().take(80).ifEmpty { "video" }
+        executer(construire(r.flux, tmp, nom, r.page, true), pid, item)
+    }
+
+    private fun construire(url: String, tmp: File, nom: String?, referer: String?, simple: Boolean): YoutubeDLRequest {
         val req = YoutubeDLRequest(url)
         req.addOption("--no-playlist")
-        req.addOption("--no-mtime")
         req.addOption("--retries", "5")
-        req.addOption("--restrict-filenames")
+        if (!simple) {
+            req.addOption("--no-mtime")
+            req.addOption("--restrict-filenames")
+        }
         req.addOption("-o", tmp.absolutePath + "/" + (nom ?: "%(title).80s") + ".%(ext)s")
         if (referer != null) {
             req.addOption("--referer", referer)
@@ -179,16 +202,24 @@ class DownloadService : Service() {
         }
         when (Store.format) {
             1 -> {
-                req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b")
-                req.addOption("--merge-output-format", "mp4")
+                if (simple) {
+                    req.addOption("-f", "b[height<=720]/b/best")
+                } else {
+                    req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b")
+                    req.addOption("--merge-output-format", "mp4")
+                }
             }
             2 -> {
                 req.addOption("-x")
                 req.addOption("--audio-format", "mp3")
             }
             else -> {
-                req.addOption("-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b")
-                req.addOption("--merge-output-format", "mp4")
+                if (simple) {
+                    req.addOption("-f", "b/best")
+                } else {
+                    req.addOption("-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b")
+                    req.addOption("--merge-output-format", "mp4")
+                }
             }
         }
         return req

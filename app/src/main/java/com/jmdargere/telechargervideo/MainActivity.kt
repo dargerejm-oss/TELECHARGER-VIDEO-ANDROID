@@ -352,7 +352,7 @@ class MainActivity : Activity() {
         col.addView(TextView(this).apply {
             text = detail
             textSize = 11f
-            maxLines = 2
+            maxLines = 8
             setTextColor(if (it.status == Store.ERREUR) rouge else Color.GRAY)
         })
         l.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
