@@ -109,30 +109,25 @@ class DownloadService : Service() {
                 val pid = "dl" + System.currentTimeMillis()
                 Store.currentProcessId = pid
                 try {
-                    val req = YoutubeDLRequest(item.url)
-                    req.addOption("--no-playlist")
-                    req.addOption("--no-mtime")
-                    req.addOption("--retries", "5")
-                    req.addOption("--restrict-filenames")
-                    req.addOption("-o", tmp.absolutePath + "/%(title).80s.%(ext)s")
-                    when (Store.format) {
-                        1 -> {
-                            req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b")
-                            req.addOption("--merge-output-format", "mp4")
-                        }
-                        2 -> {
-                            req.addOption("-x")
-                            req.addOption("--audio-format", "mp3")
-                        }
-                        else -> {
-                            req.addOption("-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b")
-                            req.addOption("--merge-output-format", "mp4")
-                        }
-                    }
-                    YoutubeDL.getInstance().execute(req, pid) { progress, _, _ ->
-                        item.pct = if (progress < 0f) item.pct else progress
+                    try {
+                        executer(construire(item.url, tmp, null, null), pid, item)
+                    } catch (e: Throwable) {
+                        if (Store.stopRequested) throw e
+                        if (!(e.message ?: "").contains("Unsupported URL")) throw e
+                        // Site non reconnu : détection automatique du flux vidéo
+                        item.pct = 0f
+                        majNotif(item, "Détection de la vidéo…")
                         Store.changed()
-                        majNotif(item, "Téléchargement…")
+                        StreamSniffer.urlCible = item.url
+                        val r = StreamSniffer.detect(applicationContext) { Store.stopRequested }
+                        if (Store.stopRequested) throw e
+                        if (r.flux == null) {
+                            tmp.listFiles()?.forEach { it.delete() }
+                            throw RuntimeException("Aucune vidéo libre trouvée sur cette page (payante, protégée ou illisible)")
+                        }
+                        tmp.listFiles()?.forEach { it.delete() }
+                        val nom = r.titre.replace(Regex("[\\\\/:*?\"<>|%\\r\\n]+"), " ").trim().take(80).ifEmpty { "video" }
+                        executer(construire(r.flux, tmp, nom, r.page), pid, item)
                     }
                     val fichier = tmp.listFiles()
                         ?.filter { it.isFile && it.extension.lowercase() in extOk }
@@ -168,6 +163,42 @@ class DownloadService : Service() {
             if (Store.finished) fin(ok, ko)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+        }
+    }
+
+    private fun construire(url: String, tmp: File, nom: String?, referer: String?): YoutubeDLRequest {
+        val req = YoutubeDLRequest(url)
+        req.addOption("--no-playlist")
+        req.addOption("--no-mtime")
+        req.addOption("--retries", "5")
+        req.addOption("--restrict-filenames")
+        req.addOption("-o", tmp.absolutePath + "/" + (nom ?: "%(title).80s") + ".%(ext)s")
+        if (referer != null) {
+            req.addOption("--referer", referer)
+            req.addOption("--user-agent", android.webkit.WebSettings.getDefaultUserAgent(applicationContext))
+        }
+        when (Store.format) {
+            1 -> {
+                req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b")
+                req.addOption("--merge-output-format", "mp4")
+            }
+            2 -> {
+                req.addOption("-x")
+                req.addOption("--audio-format", "mp3")
+            }
+            else -> {
+                req.addOption("-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b")
+                req.addOption("--merge-output-format", "mp4")
+            }
+        }
+        return req
+    }
+
+    private fun executer(req: YoutubeDLRequest, pid: String, item: Store.Item) {
+        YoutubeDL.getInstance().execute(req, pid) { progress, _, _ ->
+            item.pct = if (progress < 0f) item.pct else progress
+            Store.changed()
+            majNotif(item, "Téléchargement…")
         }
     }
 
