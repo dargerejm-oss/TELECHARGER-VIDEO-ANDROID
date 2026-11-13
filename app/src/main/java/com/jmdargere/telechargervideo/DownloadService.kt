@@ -147,7 +147,7 @@ class DownloadService : Service() {
                         item.pct = 0f
                     } else {
                         item.status = Store.ERREUR
-                        item.erreur = (e.message ?: "erreur").lines().filter { it.isNotBlank() }.takeLast(3).joinToString(" | ").take(420)
+                        item.erreur = messageErreur(e.message ?: "erreur")
                         ko++
                     }
                 } finally {
@@ -190,6 +190,8 @@ class DownloadService : Service() {
     private fun construire(url: String, tmp: File, nom: String?, referer: String?, simple: Boolean): YoutubeDLRequest {
         val req = YoutubeDLRequest(url)
         req.addOption("--no-playlist")
+        req.addOption("--no-warnings")
+        req.addOption("--no-colors")
         req.addOption("--retries", "5")
         if (!simple) {
             req.addOption("--no-mtime")
@@ -223,6 +225,14 @@ class DownloadService : Service() {
             }
         }
         return req
+    }
+
+    // Garde les lignes "ERROR" (la vraie cause) plutôt que les avertissements
+    private fun messageErreur(brut: String): String {
+        val lignes = brut.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val erreurs = lignes.filter { it.startsWith("ERROR", ignoreCase = true) }
+        val choix = if (erreurs.isNotEmpty()) erreurs.takeLast(2) else lignes.takeLast(3)
+        return choix.joinToString(" | ").take(600)
     }
 
     private fun executer(req: YoutubeDLRequest, pid: String, item: Store.Item) {
